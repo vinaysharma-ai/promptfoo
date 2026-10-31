@@ -621,22 +621,28 @@ function synchronizeLegacyTransportHeaders(
   return { ...metadataWithoutHeaders, headers: hookResponseMetadata.headers };
 }
 
+function findGraderError(root: GradingResult): GradingResult | undefined {
+  // Assertion sets can expose a component directly and through its parent.
+  const components = new Set([root]);
+  for (const result of components) {
+    if (result.metadata?.graderError === true) {
+      return result;
+    }
+    for (const child of result.componentResults ?? []) {
+      components.add(child);
+    }
+  }
+  return undefined;
+}
+
 function applyGradingResult(row: EvaluateResult, checkResult: GradingResult) {
-  const graderErrorResult =
-    checkResult.metadata?.graderError === true
-      ? checkResult
-      : checkResult.componentResults?.find((result) => result.metadata?.graderError === true);
-  const graderError = graderErrorResult !== undefined;
-  const gradingResult = graderError
-    ? {
-        ...checkResult,
-        pass: false,
-        reason: graderErrorResult.reason || checkResult.reason,
-      }
+  const error = findGraderError(checkResult);
+  const gradingResult = error
+    ? { ...checkResult, pass: false, reason: error.reason || 'Grader execution failed' }
     : checkResult;
-  if (!checkResult.pass || graderError) {
-    row.error = graderErrorResult?.reason || gradingResult.reason;
-    row.failureReason = graderError ? ResultFailureReason.ERROR : ResultFailureReason.ASSERT;
+  if (!gradingResult.pass) {
+    row.error = gradingResult.reason;
+    row.failureReason = error ? ResultFailureReason.ERROR : ResultFailureReason.ASSERT;
   }
   row.success = gradingResult.pass;
   row.score = gradingResult.score;

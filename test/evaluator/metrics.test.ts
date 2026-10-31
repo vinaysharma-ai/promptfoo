@@ -29,77 +29,68 @@ describeEvaluator('evaluator metrics and scoring', () => {
     vi.restoreAllMocks();
   });
 
-  it('counts grader execution failures as errors even when the aggregate threshold passes', async () => {
-    const matchers = await import('../../src/matchers/llmGrading');
-    vi.spyOn(matchers, 'matchesFactuality').mockResolvedValue({
-      pass: false,
-      score: 0,
-      reason: 'Grader provider unavailable',
-      tokensUsed: { total: 0, prompt: 0, completion: 0, numRequests: 0 },
-      metadata: { graderError: true },
-    });
+  const unavailable = {
+    pass: false,
+    score: 0,
+    reason: 'Grader provider unavailable',
+    metadata: { graderError: true as const },
+  };
+  const mismatch = { pass: false, score: 0, reason: 'The answer disagrees with the reference.' };
+  const group = { pass: true, score: 1, reason: 'Grader group' };
 
+  it.each([
+    {
+      name: 'unavailable grader',
+      verdict: unavailable,
+      expected: ResultFailureReason.ERROR,
+      reason: unavailable.reason,
+    },
+    {
+      name: 'grader error without a reason',
+      verdict: { ...unavailable, reason: '' },
+      expected: ResultFailureReason.ERROR,
+      reason: 'Grader execution failed',
+    },
+    {
+      name: 'nested grader error',
+      verdict: { ...group, componentResults: [{ ...group, componentResults: [unavailable] }] },
+      expected: ResultFailureReason.ERROR,
+      reason: unavailable.reason,
+    },
+    {
+      name: 'ordinary mismatch',
+      verdict: mismatch,
+      expected: ResultFailureReason.ASSERT,
+      reason: mismatch.reason,
+    },
+  ])('persists the verdict and metrics for $name', async ({ verdict, expected, reason }) => {
+    const matchers = await import('../../src/matchers/llmGrading');
+    vi.spyOn(matchers, 'matchesFactuality').mockResolvedValue(verdict);
+    const isError = expected === ResultFailureReason.ERROR;
     const testSuite: TestSuite = {
       providers: [mockApiProvider],
-      prompts: [toPrompt('Test prompt for grader failure')],
+      prompts: [toPrompt('Grade this reply')],
       tests: [
         {
-          threshold: 0,
-          assert: [{ type: 'factuality', value: 'Expected output' }],
+          threshold: isError ? 0 : undefined,
+          assert: [{ type: 'factuality', value: 'Reference' }],
         },
       ],
     };
-
-    const evalRecord = await Eval.create({}, testSuite.prompts, { id: randomUUID() });
-    await evaluate(testSuite, evalRecord, {});
-
-    const summary = await evalRecord.toEvaluateSummary();
-    const result = summary.results[0];
-    const metrics = evalRecord.prompts[0]?.metrics;
-
-    expect(result.success).toBe(false);
-    expect(result.failureReason).toBe(ResultFailureReason.ERROR);
-    expect(result.gradingResult?.pass).toBe(false);
-    expect(result.gradingResult?.reason).toContain('Grader provider unavailable');
-    expect(result.gradingResult?.reason).not.toContain('Aggregate score');
-    expect(result.gradingResult?.componentResults?.[0]).toMatchObject({
-      metadata: { graderError: true },
+    const record = await Eval.create({}, testSuite.prompts, { id: randomUUID() });
+    await evaluate(testSuite, record, {});
+    const summary = await record.toEvaluateSummary();
+    expect(summary.results[0]).toMatchObject({
+      success: false,
+      failureReason: expected,
+      error: reason,
+      gradingResult: { pass: false, reason },
     });
-    expect(result.error).toBe('Grader provider unavailable');
-    expect(metrics?.testErrorCount).toBe(1);
-    expect(metrics?.testFailCount).toBe(0);
-  });
-
-  it('counts a valid negative factuality grade as an assertion failure', async () => {
-    const matchers = await import('../../src/matchers/llmGrading');
-    vi.spyOn(matchers, 'matchesFactuality').mockResolvedValue({
-      pass: false,
-      score: 0,
-      reason: 'The answer disagrees with the reference.',
-      tokensUsed: { total: 0, prompt: 0, completion: 0, numRequests: 0 },
+    expect(summary.results[0].gradingResult?.componentResults?.[0]).toMatchObject(verdict);
+    expect(record.prompts[0].metrics).toMatchObject({
+      testErrorCount: isError ? 1 : 0,
+      testFailCount: isError ? 0 : 1,
     });
-
-    const testSuite: TestSuite = {
-      providers: [mockApiProvider],
-      prompts: [toPrompt('Test prompt for negative grade')],
-      tests: [
-        {
-          assert: [{ type: 'factuality', value: 'Expected output' }],
-        },
-      ],
-    };
-
-    const evalRecord = await Eval.create({}, testSuite.prompts, { id: randomUUID() });
-    await evaluate(testSuite, evalRecord, {});
-
-    const summary = await evalRecord.toEvaluateSummary();
-    const result = summary.results[0];
-    const metrics = evalRecord.prompts[0]?.metrics;
-
-    expect(result.failureReason).toBe(ResultFailureReason.ASSERT);
-    expect(result.gradingResult?.componentResults?.[0].metadata?.graderError).toBeUndefined();
-    expect(metrics?.testFailCount).toBe(1);
-    expect(metrics?.testErrorCount).toBe(0);
   });
 
   it('evaluator should count named score assertions per metric', async () => {
